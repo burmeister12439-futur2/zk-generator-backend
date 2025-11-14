@@ -138,7 +138,7 @@ ANTWORT NUR als JSON ohne Markdown-Backticks:
             status_code=500,
             detail=f"Failed to parse Claude response as JSON: {str(e)}"
         )
-    except anthropic.APIError as e:
+    except requests.exceptions.RequestException as e:
         raise HTTPException(
             status_code=500,
             detail=f"Anthropic API error: {str(e)}"
