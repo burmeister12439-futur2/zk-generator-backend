@@ -66,8 +66,7 @@ async def analyze_text(request: AnalyzeRequest):
     # Text begrenzen
     text_truncated = request.text[:2000]
     
-    prompt = f"""
-Analysiere diesen deutschen Text und identifiziere den zentralen Zielkonflikt.
+    prompt = f"""Analysiere diesen deutschen Text und identifiziere den zentralen Zielkonflikt.
 Ein ZK ist ein systemischer Konflikt zwischen zwei gesellschaftlichen Funktionen/Werten,
 die sich gegenseitig behindern.
 
@@ -82,7 +81,7 @@ AUFGABE:
 WICHTIG:
 - Pole müssen abstrakte Systemfunktionen sein, keine Akteure
 - Beispiel GUT: "Kosteneffizienz = Lebensschutz?"
-- Beispiel SCHLECHT: "Streeck = Patienten­schützer"
+- Beispiel SCHLECHT: "Streeck = Patientenschützer"
 
 ANTWORTE NUR als JSON ohne Markdown-Backticks:
 
@@ -91,8 +90,7 @@ ANTWORTE NUR als JSON ohne Markdown-Backticks:
     "polB": "Prägnante Bezeichnung",
     "confidence": "hoch",
     "begründung": "1-2 Sätze Erklärung"
-}}
-""".strip()
+}}"""
 
     try:
         # Stabil dokumentiertes Modell verwenden
@@ -115,19 +113,36 @@ ANTWORTE NUR als JSON ohne Markdown-Backticks:
         result = response.json()
         
         # Claude's Antwort extrahieren
+        content_text = result["content"][0]["text"]
+        
+        # Bereinige mögliche Markdown-Backticks
+        content_text = content_text.strip()
+        if content_text.startswith("```json"):
+            content_text = content_text[7:]
+        if content_text.startswith("```"):
+            content_text = content_text[3:]
+        if content_text.endswith("```"):
+            content_text = content_text[:-3]
+        content_text = content_text.strip()
+        
+        # JSON parsen
+        parsed = json.loads(content_text)
+        
+        # clean_pole Funktion
         def clean_pole(s: str) -> str:
             s = re.sub(r'[„"\']+', '', s)
             return s.strip()
         
         return AnalyzeResponse(
-            polA=clean_pole(result.get("polA", "")),
-            polB=clean_pole(result.get("polB", "")),
-            confidence=result.get("confidence", "mittel"),
-            explanation=result.get("begründung", ""),
+            polA=clean_pole(parsed.get("polA", "")),
+            polB=clean_pole(parsed.get("polB", "")),
+            confidence=parsed.get("confidence", "mittel"),
+            explanation=parsed.get("begründung", ""),
         )
     
     except json.JSONDecodeError as e:
         print("JSON parse error from Claude:", str(e))
+        print("Raw content:", content_text if 'content_text' in locals() else "N/A")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to parse Claude response as JSON: {str(e)}",
