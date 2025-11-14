@@ -9,15 +9,10 @@ app = FastAPI(title="ZK Generator Backend")
 # CORS für GitHub Pages
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://burmeister12439-futur2.github.io",
-        "http://localhost:3000",  # Für lokales Testing
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+    allow_origins=["*"],  # Erlaubt alle Origins
+allow_credentials=True,
+allow_methods=["*"],
+allow_headers=["*"],
 class AnalyzeRequest(BaseModel):
     text: str
 
