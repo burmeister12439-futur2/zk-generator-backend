@@ -91,21 +91,30 @@ ANTWORT NUR als JSON ohne Markdown-Backticks:
 }}"""
     
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
+        # Direct REST API call - works everywhere!
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30
         )
         
-        # Extract text from response
-        response_text = message.content[0].text
+        if response.status_code != 200:
+            raise Exception(f"API Error: {response.status_code} - {response.text}")
+        
+        result_data = response.json()
+        response_text = result_data["content"][0]["text"]
         
         # Clean markdown artifacts
-        response_text = response_text.replace("```json\n", "").replace("```\n", "").replace("```", "").strip()
+        response_text = response_text.replace("```json\n", "").replace("```\n", "").replace("'''", "").strip()
         
         # Parse JSON
         result = json.loads(response_text)
