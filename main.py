@@ -1,14 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from anthropic import Anthropic
 import os
+from typing import List, Dict, Optional
 import json
-import re
-import requests
 
-app = FastAPI(title="ZK Generator Backend")
+app = FastAPI()
 
-# CORS – fürs Debuggen erstmal offen, später gern einschränken
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,152 +17,232 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize Anthropic client
+client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
-class AnalyzeRequest(BaseModel):
-    text: str
+class PolicyText(BaseModel):
+    policy_text: str
 
+class ThreeYesCheck(BaseModel):
+    system_function: bool
+    system_function_reasoning: str
+    implementation_collision: bool
+    implementation_reasoning: str
+    current_pressure: bool
+    pressure_reasoning: str
 
-class AnalyzeResponse(BaseModel):
-    polA: str
-    polB: str
-    confidence: str
-    explanation: str
+class GoalConflict(BaseModel):
+    conflict: str
+    function_a: str
+    function_b: str
+    implementation_collision: str
+    centrality_score: float
+    three_yes: ThreeYesCheck
+    category: str
 
+class MultiConflictResponse(BaseModel):
+    conflicts: List[GoalConflict]
+    total_count: int
+
+# System prompt for multi-conflict detection
+MULTI_DETECTION_PROMPT = """Du bist ein Experte für die Identifikation von Zielkonflikten in der deutschen Transformationspolitik.
+
+AUFGABE: Analysiere den gegebenen Politiktext und identifiziere ALLE vorhandenen Zielkonflikte. Ein Zielkonflikt liegt vor, wenn zwei gesellschaftliche Funktionen in ihrer Umsetzung kollidieren.
+
+WICHTIGE DEFINITIONEN:
+
+1. GESELLSCHAFTLICHE FUNKTIONEN - Beispiele:
+   - Wirtschaftswachstum und Wettbewerbsfähigkeit
+   - Klimaschutz und Dekarbonisierung
+   - Soziale Sicherheit und Gerechtigkeit
+   - Gesundheitsversorgung
+   - Bildung und Qualifikation
+   - Wohnraumversorgung
+   - Demokratische Teilhabe
+   - Technologische Innovation
+   - Infrastruktur und Mobilität
+   - Natürlicher Ressourcenschutz
+
+2. ZIELKONFLIKT-KRITERIEN (3-YES-REGEL):
+   
+   a) Systemfunktionalität: Sind beide Funktionen essentiell für das Funktionieren der Gesellschaft?
+   
+   b) Implementierungskollision: Behindern sich die Funktionen konkret in ihrer Umsetzung? (Nicht nur theoretische Spannung!)
+   
+   c) Aktueller Druck: Besteht derzeit politischer/gesellschaftlicher Handlungsdruck für beide Seiten?
+
+3. KATEGORISIERUNG:
+   - ZENTRAL: 3x JA bei 3-YES-Regel
+   - PRÜF: 2x JA bei 3-YES-Regel
+   - HINTERGRUND: 1x oder 0x JA bei 3-YES-Regel
+
+ZENTRALITÄTS-BEWERTUNG:
+Bewerte für jeden identifizierten Konflikt, wie zentral er im Text behandelt wird (0.0 - 1.0):
+- 1.0: Hauptthema des Textes, ausführlich diskutiert
+- 0.7-0.9: Deutlich behandelt, wichtiger Aspekt
+- 0.4-0.6: Erwähnt und angedeutet
+- 0.1-0.3: Nur am Rande erwähnt
+
+VORGEHEN:
+1. Lies den gesamten Text sorgfältig
+2. Identifiziere ALLE Stellen, wo gesellschaftliche Funktionen erwähnt werden
+3. Prüfe systematisch, ob zwischen diesen Funktionen Konflikte bestehen
+4. Formuliere jeden Konflikt präzise
+5. Bewerte Zentralität jedes Konflikts im Text
+6. Führe 3-YES-Check für jeden Konflikt durch
+7. Kategorisiere jeden Konflikt
+
+WICHTIG:
+- Finde ALLE Konflikte, nicht nur den offensichtlichsten
+- Sei präzise in der Formulierung
+- Unterscheide zwischen tatsächlichen Umsetzungskonflikten und bloßen Spannungsfeldern
+- Ranke nach Zentralität im Text (nicht nach politischer Wichtigkeit!)
+
+Antworte ausschließlich mit einem JSON-Array im folgenden Format:
+
+{
+  "conflicts": [
+    {
+      "conflict": "Präzise Formulierung des Zielkonflikts",
+      "function_a": "Erste gesellschaftliche Funktion",
+      "function_b": "Zweite gesellschaftliche Funktion",
+      "implementation_collision": "Konkrete Beschreibung, wie sich die Umsetzung beider Funktionen behindert",
+      "centrality_score": 0.85,
+      "three_yes": {
+        "system_function": true,
+        "system_function_reasoning": "Begründung",
+        "implementation_collision": true,
+        "implementation_reasoning": "Begründung",
+        "current_pressure": true,
+        "pressure_reasoning": "Begründung"
+      },
+      "category": "ZENTRAL"
+    }
+  ]
+}
+
+Gib KEINE zusätzlichen Erklärungen, nur das JSON-Array. Falls keine Zielkonflikte identifiziert werden, gib ein leeres Array zurück: {"conflicts": []}
+"""
 
 @app.get("/")
 async def root():
     return {
-        "service": "ZK Generator Backend",
-        "version": "1.0",
-        "status": "operational",
+        "message": "ZK-RK Analysis API v8.0 - Multi-Conflict Detection",
+        "endpoints": {
+            "/analyze-multi": "POST - Analyze text for multiple goal conflicts with ranking"
+        }
     }
 
-
-@app.get("/health")
-async def health():
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    return {
-        "status": "healthy",
-        "api_key_configured": bool(api_key),
-    }
-
-
-@app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze_text(request: AnalyzeRequest):
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="API key not configured. Please set ANTHROPIC_API_KEY environment variable.",
-        )
-    
-    if len(request.text) < 50:
+@app.post("/analyze-multi", response_model=MultiConflictResponse)
+async def analyze_multi_conflicts(data: PolicyText):
+    """
+    Analyze policy text and identify ALL goal conflicts, ranked by centrality
+    """
+    if not data.policy_text or len(data.policy_text.strip()) < 50:
         raise HTTPException(
             status_code=400,
-            detail="Text too short. Minimum 50 characters required.",
+            detail="Text zu kurz. Bitte geben Sie einen aussagekräftigen Politiktext ein."
         )
     
-    # Text begrenzen
-    text_truncated = request.text[:2000]
-    
-    prompt = f"""Analysiere diesen deutschen Text und identifiziere den zentralen Zielkonflikt.
-Ein ZK ist ein systemischer Konflikt zwischen zwei gesellschaftlichen Funktionen/Werten,
-die sich gegenseitig behindern.
-
-TEXT:
-\"\"\"{text_truncated}\"\"\"
-
-AUFGABE:
-1. Finde die zwei gegensätzlichen Pole des Hauptkonflikts
-2. Formuliere sie präzise und konkret (max. 50 Zeichen pro Pol)
-3. Begründe kurz, warum das der Kernkonflikt ist
-
-WICHTIG:
-- Pole müssen abstrakte Systemfunktionen sein, keine Akteure
-- Beispiel GUT: "Kosteneffizienz = Lebensschutz?"
-- Beispiel SCHLECHT: "Streeck = Patientenschützer"
-
-ANTWORTE NUR als JSON ohne Markdown-Backticks:
-
-{{
-    "polA": "Prägnante Bezeichnung",
-    "polB": "Prägnante Bezeichnung",
-    "confidence": "hoch",
-    "begründung": "1-2 Sätze Erklärung"
-}}"""
-
     try:
-        # Stabil dokumentiertes Modell verwenden
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=30
+        # Call Claude API for multi-conflict detection
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{MULTI_DETECTION_PROMPT}\n\nZU ANALYSIERENDER TEXT:\n\n{data.policy_text}"
+                }
+            ]
         )
-        response.raise_for_status()
         
-        result = response.json()
+        # Extract and parse response
+        response_text = message.content[0].text.strip()
         
-        # Claude's Antwort extrahieren
-        content_text = result["content"][0]["text"]
+        # Remove markdown code blocks if present
+        if response_text.startswith("```json"):
+            response_text = response_text.replace("```json", "").replace("```", "").strip()
+        elif response_text.startswith("```"):
+            response_text = response_text.replace("```", "").strip()
         
-        # Bereinige mögliche Markdown-Backticks
-        content_text = content_text.strip()
-        if content_text.startswith("```json"):
-            content_text = content_text[7:]
-        if content_text.startswith("```"):
-            content_text = content_text[3:]
-        if content_text.endswith("```"):
-            content_text = content_text[:-3]
-        content_text = content_text.strip()
+        # Parse JSON response
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError as e:
+            print(f"JSON Parse Error: {e}")
+            print(f"Response text: {response_text}")
+            raise HTTPException(
+                status_code=500,
+                detail="Fehler beim Parsen der Analyseergebnisse"
+            )
         
-        # JSON parsen
-        parsed = json.loads(content_text)
+        conflicts = result.get("conflicts", [])
         
-        # clean_pole Funktion
-        def clean_pole(s: str) -> str:
-            s = re.sub(r'[„"\']+', '', s)
-            return s.strip()
-        
-        return AnalyzeResponse(
-            polA=clean_pole(parsed.get("polA", "")),
-            polB=clean_pole(parsed.get("polB", "")),
-            confidence=parsed.get("confidence", "mittel"),
-            explanation=parsed.get("begründung", ""),
+        # Sort conflicts by centrality score (highest first)
+        conflicts_sorted = sorted(
+            conflicts,
+            key=lambda x: x.get("centrality_score", 0),
+            reverse=True
         )
-    
-    except json.JSONDecodeError as e:
-        print("JSON parse error from Claude:", str(e))
-        print("Raw content:", content_text if 'content_text' in locals() else "N/A")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to parse Claude response as JSON: {str(e)}",
+        
+        # Validate and structure response
+        structured_conflicts = []
+        for conflict in conflicts_sorted:
+            try:
+                structured_conflict = GoalConflict(
+                    conflict=conflict["conflict"],
+                    function_a=conflict["function_a"],
+                    function_b=conflict["function_b"],
+                    implementation_collision=conflict["implementation_collision"],
+                    centrality_score=conflict.get("centrality_score", 0.5),
+                    three_yes=ThreeYesCheck(**conflict["three_yes"]),
+                    category=conflict["category"]
+                )
+                structured_conflicts.append(structured_conflict)
+            except Exception as e:
+                print(f"Error structuring conflict: {e}")
+                continue
+        
+        return MultiConflictResponse(
+            conflicts=structured_conflicts,
+            total_count=len(structured_conflicts)
         )
-    except requests.exceptions.RequestException as e:
-        print("Requests error to Anthropic:", str(e))
-        raise HTTPException(
-            status_code=502,
-            detail=f"Network error talking to Anthropic API: {str(e)}",
-        )
-    except HTTPException:
-        # bereits korrekt gebaut – einfach weiterreichen
-        raise
+        
     except Exception as e:
-        print("Unexpected backend error:", str(e))
+        print(f"Error in analyze_multi_conflicts: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Unexpected backend error: {str(e)}",
+            detail=f"Fehler bei der Analyse: {str(e)}"
         )
 
+# Keep original single-conflict endpoint for backwards compatibility
+@app.post("/analyze")
+async def analyze_single_conflict(data: PolicyText):
+    """
+    Original endpoint - returns only the primary (most central) conflict
+    """
+    multi_result = await analyze_multi_conflicts(data)
+    
+    if not multi_result.conflicts:
+        raise HTTPException(
+            status_code=404,
+            detail="Kein Zielkonflikt im Text identifiziert"
+        )
+    
+    # Return only the primary conflict (highest centrality)
+    primary_conflict = multi_result.conflicts[0]
+    
+    return {
+        "conflict": primary_conflict.conflict,
+        "function_a": primary_conflict.function_a,
+        "function_b": primary_conflict.function_b,
+        "implementation_collision": primary_conflict.implementation_collision,
+        "centrality_score": primary_conflict.centrality_score,
+        "three_yes": primary_conflict.three_yes.dict(),
+        "category": primary_conflict.category
+    }
 
 if __name__ == "__main__":
     import uvicorn
